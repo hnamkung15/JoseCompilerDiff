@@ -438,8 +438,15 @@ class RmtIlpCompiler:
 
         for log in range(self.logMax):
             for st in range(self.stMax):
+                total = sum([self.block[mem][log,st] for mem in self.all])
+                self.m.constrain(total <= self.logicalTableIDs[log, st] * upperBound[st])
+
+        for log in range(self.logMax):
+            for st in range(self.stMax):
                 # blockAllMemBin doesn't count action RAMs
                 total = sum([self.block[mem][log,st] for mem in self.all])
+
+                total += self.logicalTableIDs[log, st]
 
                 self.m.constrain(total <= upperBound[st] * self.blockAllMemBin[log,st])
                 self.m.constrain(total >= lowerBound * self.blockAllMemBin[log,st])
@@ -455,10 +462,20 @@ class RmtIlpCompiler:
         # print(self.switch.resolutionLogicNumMatchTables)
         
 
-        numMatchTablesUsed = self.blockAllMemBin.T * np.ones((self.logMax,1))
-        numMatchTablesAvailable = self.switch.resolutionLogicNumMatchTables * np.ones((self.stMax,1))
-        self.m.constrain(numMatchTablesUsed <= numMatchTablesAvailable)
-        self.dictNumConstraints['st'] += 1
+        for st in range(self.stMax):
+            cond_log_table_ids = 0
+            normal_log_table_ids = 0
+            for log in range(self.logMax):
+                name = self.program.names[log]
+                if "condition" in name:
+                    cond_log_table_ids += self.logicalTableIDs[log, st]
+                else:
+                    normal_log_table_ids += self.logicalTableIDs[log, st]
+            
+            if not isinstance(cond_log_table_ids, int):
+                self.m.constrain(cond_log_table_ids <= 16)
+            if not isinstance(normal_log_table_ids, int):
+                self.m.constrain(normal_log_table_ids <= 16)
 
     # blockAllMemBin
     def actionCrossbarConstraint(self): # double checked
@@ -507,6 +524,26 @@ class RmtIlpCompiler:
                 self.m.constrain(self.endAllMemTimesBlockAllMemBin[log, st] >= self.endAllMem[log, st] + self.blockAllMemBin[log, st] - 1)
 
         self.dictNumConstraints['log*st'] += 6
+
+    # hun_log
+    def hunAdditionalConstraints(self):
+        # capacity constraint
+        self.m.constrain(self.hashDistUnitVar.T * np.ones(self.logMax) <= self.switch.maxHashDistUnit * np.ones(self.stMax))
+        self.m.constrain(self.saluVar.T * np.ones(self.logMax) <= self.switch.maxSALU * np.ones(self.stMax))
+        self.m.constrain(self.saluVar.T * self.program.registerBlockList <= self.switch.maxMapRAM * np.ones(self.stMax))
+
+        # assignment constraint
+        allocatedHashes = self.hashDistUnitVar * np.ones(self.stMax)
+        self.m.constrain(allocatedHashes == self.program.hashDistUnitList)
+
+        allocatedSALUs = self.saluVar * np.ones(self.stMax)
+        self.m.constrain(allocatedSALUs == self.program.saluList)
+
+        # hashDistUnit and SALU must be in the start stage
+        for log in range(self.logMax):
+            for st in range(self.stMax):
+                self.m.constrain(self.hashDistUnitVar[log,st] <= self.startAllMem[log,st])
+                self.m.constrain(self.saluVar[log,st] <= self.startAllMem[log,st])
 
     """ Variables """
 
@@ -631,6 +668,10 @@ class RmtIlpCompiler:
         self.logger.info("Setting up variables for start and end stages");
         self.startAndEndStagesVariables()
 
+        self.hashDistUnitVar = self.m.new((logMax, stMax), vtype=int, lb=0, ub=1, name='hashDistUnit')
+        self.saluVar = self.m.new((logMax, stMax), vtype=int, lb=0, ub=1, name='salu')
+        self.logicalTableIDs = self.m.new((logMax, stMax), vtype=int, lb=0, ub=1, name='logicalTableIDs')
+
 
         self.getXxAllMemTimesBlockAllMemBin()
 
@@ -710,6 +751,8 @@ class RmtIlpCompiler:
 
         self.logger.info("Setting up constraint to get an upper bound on maximum stage, which can minimize in objective if needed")
         self.maximumStageConstraint()
+
+        self.hunAdditionalConstraints()
 
         self.startingDict = {}
 
